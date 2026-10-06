@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gmaps-list-copy"
+version = "0.1.0"
+description = "Copy Google Maps saved-place lists from a Google Takeout export."
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+  { name = "Darren Buttigieg" },
+]
+dependencies = []
+
+[project.scripts]
+gmaps-list-copy = "gmaps_list_copy.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
