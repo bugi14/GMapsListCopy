@@ -6,11 +6,10 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from .copy_workflow import (
+from .browser_workflow import (
     WorkflowProblem,
-    default_state_path,
     print_summary,
-    run_assisted_copy,
+    run_browser_copy,
 )
 from .importer import ImportProblem, load_saved_lists
 from .models import SavedList
@@ -33,20 +32,22 @@ def build_parser() -> argparse.ArgumentParser:
     show_parser.add_argument("--json", action="store_true", help="Emit JSON output.")
 
     copy_parser = subparsers.add_parser(
-        "copy", help="Guide a resumable copy into a user-owned Google Maps list."
+        "copy", help="Copy a selected Maps list using visible browser automation."
     )
-    copy_parser.add_argument("input", type=Path, help="Takeout ZIP, directory, or CSV.")
-    copy_parser.add_argument("list_id", help="Identifier printed by the list command.")
-    copy_parser.add_argument("destination", help="Name of the destination Maps list.")
     copy_parser.add_argument(
         "--state",
         type=Path,
-        help="Progress file path; defaults to .gmaps-list-copy/<session>.json.",
+        help="Optional progress file path.",
     )
     copy_parser.add_argument(
-        "--no-open",
-        action="store_true",
-        help="Print URLs without opening them in the default browser.",
+        "--profile",
+        type=Path,
+        help="Persistent browser profile path.",
+    )
+    copy_parser.add_argument(
+        "--destination-suffix",
+        default=" (copy)",
+        help="Suffix appended to the selected source-list name.",
     )
 
     return parser
@@ -55,24 +56,24 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "copy":
+            options = {
+                "state_path": args.state,
+                "destination_suffix": args.destination_suffix,
+                "output": sys.stdout,
+            }
+            if args.profile is not None:
+                options["profile_path"] = args.profile
+            summary = run_browser_copy(**options)
+            print_summary(summary, sys.stdout)
+            return 0 if summary.complete else 1
+
         saved_lists = load_saved_lists(args.input)
         if args.command == "list":
             _print_lists(saved_lists, as_json=args.json)
-        elif args.command == "show":
-            selected = _select_list(saved_lists, args.list_id)
-            _print_list(selected, as_json=args.json)
         else:
             selected = _select_list(saved_lists, args.list_id)
-            state_path = args.state or default_state_path(selected, args.destination)
-            summary = run_assisted_copy(
-                selected,
-                args.destination,
-                state_path,
-                open_browser=not args.no_open,
-                output=sys.stdout,
-            )
-            print_summary(summary, sys.stdout)
-            return 0 if summary.complete else 1
+            _print_list(selected, as_json=args.json)
         return 0
     except (ImportProblem, WorkflowProblem) as exc:
         print(f"error: {exc}", file=sys.stderr)
