@@ -339,6 +339,52 @@ def _discover_lists(page: Any) -> tuple[MapsList, ...]:
         href = candidate.get_attribute("href")
         found.setdefault(text.casefold(), MapsList(text, href))
 
+    list_metadata = page.get_by_text(
+        re.compile(
+            r"^(?:Private|Shared)\s*[·•]\s*[\d,]+\s+places?$",
+            re.IGNORECASE,
+        )
+    )
+    for index in range(list_metadata.count()):
+        metadata = list_metadata.nth(index)
+        if not metadata.is_visible():
+            continue
+        details = metadata.evaluate(
+            """
+            node => {
+                const metadataText = (node.innerText || node.textContent || '').trim();
+                let container = node.parentElement;
+                for (let depth = 0; container && depth < 5; depth += 1) {
+                    const lines = (container.innerText || '')
+                        .split('\n')
+                        .map(line => line.trim())
+                        .filter(Boolean);
+                    const metadataIndex = lines.indexOf(metadataText);
+                    if (metadataIndex > 0 && lines.length <= 6) {
+                        const link = container.closest('a[href]') ||
+                            container.querySelector('a[href]');
+                        return {
+                            name: lines[metadataIndex - 1],
+                            href: link ? link.getAttribute('href') : null,
+                        };
+                    }
+                    container = container.parentElement;
+                }
+                return null;
+            }
+            """
+        )
+        if not isinstance(details, dict):
+            continue
+        name = _clean_list_name(str(details.get("name", "")))
+        if not name:
+            continue
+        href = details.get("href")
+        found.setdefault(
+            name.casefold(),
+            MapsList(name, str(href) if href else None),
+        )
+
     if found:
         return tuple(sorted(found.values(), key=lambda item: item.name.casefold()))
 
