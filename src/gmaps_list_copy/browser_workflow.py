@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -16,6 +18,7 @@ _STATE_VERSION = 1
 _PROFILE_DIR = Path(".gmaps-list-copy/browser-profile")
 _STATE_DIR = Path(".gmaps-list-copy/sessions")
 _DIAGNOSTIC_DIR = Path(".gmaps-list-copy/diagnostics")
+_AUTH_MARKER = ".google-session-verified"
 
 
 class WorkflowProblem(RuntimeError):
@@ -68,6 +71,9 @@ def run_browser_copy(
         ) from exc
 
     profile_path.mkdir(parents=True, exist_ok=True)
+    auth_marker = profile_path / _AUTH_MARKER
+    if not auth_marker.exists():
+        _authenticate_in_regular_chrome(profile_path, output)
     try:
         with sync_playwright() as playwright:
             try:
@@ -87,7 +93,7 @@ def run_browser_copy(
             page.set_default_timeout(15_000)
             try:
                 _open_saved(page)
-                _wait_for_authentication(page, input_fn, output)
+                _verify_authentication(page, auth_marker)
                 available_lists = _discover_lists(page)
                 source = _choose_list(available_lists, input_fn, output)
                 _open_list(page, source)
@@ -180,24 +186,72 @@ def _dismiss_consent(page: Any) -> None:
             return
 
 
-def _wait_for_authentication(
-    page: Any, input_fn: Callable[[str], str], output: TextIO
-) -> None:
+def _verify_authentication(page: Any, auth_marker: Path) -> None:
     sign_in = page.get_by_text(re.compile(r"^Sign in$", re.IGNORECASE))
     if "accounts.google.com" not in page.url and not (
         sign_in.count() and sign_in.first.is_visible()
     ):
+        auth_marker.touch()
         return
 
+    auth_marker.unlink(missing_ok=True)
+    raise WorkflowProblem(
+        "The saved Google session is missing or expired. Run the command again to "
+        "authenticate in a regular Chrome window."
+    )
+
+
+def _authenticate_in_regular_chrome(profile_path: Path, output: TextIO) -> None:
+    executable = _find_chrome_executable()
+    if executable is None:
+        raise WorkflowProblem(
+            "Google Chrome is required for authentication but was not found."
+        )
+
     print(
-        "Authenticate with Google in the opened browser. The local browser profile "
-        "will retain the session for later runs.",
+        "Opening a regular Google Chrome window for secure authentication. Sign in "
+        "to Google Maps, then close that Chrome window. Copying will continue "
+        "automatically.",
         file=output,
     )
-    input_fn("Press Enter after Google Maps is signed in: ")
-    _open_saved(page)
-    if "accounts.google.com" in page.url:
-        raise WorkflowProblem("Google authentication was not completed.")
+    command = [
+        str(executable),
+        f"--user-data-dir={profile_path.resolve()}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-background-mode",
+        _MAPS_HOME,
+    ]
+    try:
+        completed = subprocess.run(command, check=False)
+    except OSError as exc:
+        raise WorkflowProblem(f"Could not open Google Chrome: {exc}") from exc
+    if completed.returncode != 0:
+        raise WorkflowProblem(
+            f"Google Chrome exited with status {completed.returncode} during authentication."
+        )
+
+
+def _find_chrome_executable() -> Path | None:
+    candidates: list[Path] = []
+    if sys.platform == "darwin":
+        candidates.append(
+            Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        )
+    elif sys.platform == "win32":
+        for variable in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+            base = os.environ.get(variable)
+            if base:
+                candidates.append(
+                    Path(base) / "Google/Chrome/Application/chrome.exe"
+                )
+    else:
+        for name in ("google-chrome", "google-chrome-stable"):
+            resolved = shutil.which(name)
+            if resolved:
+                candidates.append(Path(resolved))
+
+    return next((candidate for candidate in candidates if candidate.is_file()), None)
 
 
 def _discover_lists(page: Any) -> tuple[MapsList, ...]:
