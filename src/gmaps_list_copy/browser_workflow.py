@@ -559,11 +559,9 @@ def _ensure_destination(page: Any, destination: str) -> None:
         new_list = page.get_by_text(re.compile(r"^New list$", re.IGNORECASE))
     new_list.first.click()
 
-    title_button = page.locator('button[aria-label="Untitled list"]')
-    title_button.first.wait_for(state="visible")
-    title_button.first.click()
-
     name_input = page.locator('input[maxlength="40"]:visible')
+    if not name_input.count():
+        page.get_by_text("Untitled list", exact=True).last.click()
     name_input.first.wait_for(state="visible")
     name_input.first.fill(destination)
     name_input.first.press("Enter")
