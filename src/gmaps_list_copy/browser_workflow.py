@@ -161,13 +161,13 @@ def _open_saved(page: Any) -> None:
     saved_button = page.get_by_role("button", name="Saved", exact=True)
     try:
         saved_button.first.wait_for(state="visible")
-        saved_button.first.click()
-        page.wait_for_load_state("domcontentloaded")
     except Exception as exc:
         raise WorkflowProblem(
             "Google Maps did not show its Saved navigation button. "
             "The Maps interface may have changed."
         ) from exc
+    saved_button.first.click(no_wait_after=True)
+    page.wait_for_timeout(1_000)
 
 
 def _dismiss_consent(page: Any) -> None:
