@@ -6,6 +6,11 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from .browser_workflow import (
+    WorkflowProblem,
+    print_summary,
+    run_browser_copy,
+)
 from .importer import ImportProblem, load_saved_lists
 from .models import SavedList
 
@@ -26,12 +31,43 @@ def build_parser() -> argparse.ArgumentParser:
     show_parser.add_argument("list_id", help="Identifier printed by the list command.")
     show_parser.add_argument("--json", action="store_true", help="Emit JSON output.")
 
+    copy_parser = subparsers.add_parser(
+        "copy", help="Copy a selected Maps list using visible browser automation."
+    )
+    copy_parser.add_argument(
+        "--state",
+        type=Path,
+        help="Optional progress file path.",
+    )
+    copy_parser.add_argument(
+        "--profile",
+        type=Path,
+        help="Persistent browser profile path.",
+    )
+    copy_parser.add_argument(
+        "--destination-suffix",
+        default=" (copy)",
+        help="Suffix appended to the selected source-list name.",
+    )
+
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "copy":
+            options = {
+                "state_path": args.state,
+                "destination_suffix": args.destination_suffix,
+                "output": sys.stdout,
+            }
+            if args.profile is not None:
+                options["profile_path"] = args.profile
+            summary = run_browser_copy(**options)
+            print_summary(summary, sys.stdout)
+            return 0 if summary.complete else 1
+
         saved_lists = load_saved_lists(args.input)
         if args.command == "list":
             _print_lists(saved_lists, as_json=args.json)
@@ -39,7 +75,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             selected = _select_list(saved_lists, args.list_id)
             _print_list(selected, as_json=args.json)
         return 0
-    except ImportProblem as exc:
+    except (ImportProblem, WorkflowProblem) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
