@@ -11,13 +11,18 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 _MAPS_HOME = "https://www.google.com/maps/?hl=en"
+_GOOGLE_SIGN_IN = (
+    "https://accounts.google.com/ServiceLogin?service=local&hl=en&continue="
+    f"{quote(_MAPS_HOME, safe='')}"
+)
 _STATE_VERSION = 1
-_PROFILE_DIR = Path(".gmaps-list-copy/browser-profile")
+_PROFILE_DIR = Path(".gmaps-list-copy/chrome-profile")
 _STATE_DIR = Path(".gmaps-list-copy/sessions")
 _DIAGNOSTIC_DIR = Path(".gmaps-list-copy/diagnostics")
+_LOG_DIR = Path(".gmaps-list-copy/logs")
 _AUTH_MARKER = ".google-session-verified"
 
 
@@ -220,15 +225,25 @@ def _authenticate_in_regular_chrome(profile_path: Path, output: TextIO) -> None:
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-background-mode",
-        _MAPS_HOME,
+        "--enable-logging=stderr",
+        _GOOGLE_SIGN_IN,
     ]
+    _LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = _LOG_DIR / "chrome-auth.log"
     try:
-        completed = subprocess.run(command, check=False)
+        with log_path.open("w", encoding="utf-8") as log:
+            completed = subprocess.run(
+                command,
+                check=False,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
     except OSError as exc:
         raise WorkflowProblem(f"Could not open Google Chrome: {exc}") from exc
     if completed.returncode != 0:
         raise WorkflowProblem(
-            f"Google Chrome exited with status {completed.returncode} during authentication."
+            f"Google Chrome exited with status {completed.returncode} during "
+            f"authentication. Log: {log_path}"
         )
 
 
