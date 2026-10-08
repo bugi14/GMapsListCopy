@@ -83,12 +83,20 @@ def run_browser_copy(
     try:
         with sync_playwright() as playwright:
             try:
+                launch_options: dict[str, Any] = {
+                    "channel": "chrome",
+                    "headless": False,
+                    "locale": "en-US",
+                    "args": ["--lang=en-US"],
+                }
+                if sys.platform == "darwin":
+                    launch_options["ignore_default_args"] = [
+                        "--password-store=basic",
+                        "--use-mock-keychain",
+                    ]
                 context = playwright.chromium.launch_persistent_context(
                     str(profile_path),
-                    channel="chrome",
-                    headless=False,
-                    locale="en-US",
-                    args=["--lang=en-US"],
+                    **launch_options,
                 )
             except PlaywrightError as exc:
                 raise WorkflowProblem(
