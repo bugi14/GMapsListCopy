@@ -564,7 +564,7 @@ def _ensure_destination(page: Any, destination: str) -> None:
         page.get_by_text("Untitled list", exact=True).last.click()
     name_input.first.wait_for(state="visible")
     name_input.first.fill(destination)
-    name_input.first.press("Enter")
+    name_input.first.press("Tab")
 
     done = page.get_by_role("button", name="Done", exact=True)
     if done.count() and done.first.is_visible():
