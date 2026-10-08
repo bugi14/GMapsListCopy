@@ -28,6 +28,7 @@ _STATE_DIR = Path(".gmaps-list-copy/sessions")
 _DIAGNOSTIC_DIR = Path(".gmaps-list-copy/diagnostics")
 _LOG_DIR = Path(".gmaps-list-copy/logs")
 _AUTH_MARKER = ".google-session-verified"
+_ENDPOINT_FILE = ".automation-endpoint"
 
 
 class WorkflowProblem(RuntimeError):
@@ -216,6 +217,12 @@ def _open_regular_chrome(
     input_fn: Callable[[str], str],
     output: TextIO,
 ) -> str:
+    existing_endpoint = _existing_debugging_endpoint(profile_path)
+    if existing_endpoint:
+        if not auth_marker.exists():
+            input_fn("Press Enter after Google Maps shows your account avatar: ")
+        return existing_endpoint
+
     port = _available_local_port()
     start_url = _MAPS_HOME if auth_marker.exists() else _GOOGLE_SIGN_IN
     command = _chrome_command(profile_path, port, start_url)
@@ -243,6 +250,7 @@ def _open_regular_chrome(
         raise WorkflowProblem(f"Could not open Google Chrome: {exc}") from exc
     endpoint = f"http://127.0.0.1:{port}"
     _wait_for_debugging_endpoint(endpoint, process, log_path)
+    (profile_path / _ENDPOINT_FILE).write_text(endpoint, encoding="utf-8")
     if not auth_marker.exists():
         input_fn("Press Enter after Google Maps shows your account avatar: ")
     return endpoint
@@ -260,16 +268,11 @@ def _chrome_command(profile_path: Path, port: int, start_url: str) -> list[str] 
         start_url,
     ]
     if sys.platform == "darwin":
-        application = Path("/Applications/Google Chrome.app")
-        if application.is_dir():
-            return [
-                "/usr/bin/open",
-                "-n",
-                "-a",
-                "Google Chrome",
-                "--args",
-                *arguments,
-            ]
+        executable = Path(
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        )
+        if executable.is_file():
+            return [str(executable), *arguments]
         return None
 
     candidates: list[Path] = []
@@ -296,6 +299,21 @@ def _available_local_port() -> int:
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         return int(listener.getsockname()[1])
+
+
+def _existing_debugging_endpoint(profile_path: Path) -> str | None:
+    endpoint_file = profile_path / _ENDPOINT_FILE
+    try:
+        endpoint = endpoint_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not endpoint.startswith("http://127.0.0.1:"):
+        return None
+    try:
+        with urllib.request.urlopen(f"{endpoint}/json/version", timeout=1):
+            return endpoint
+    except (OSError, urllib.error.URLError):
+        return None
 
 
 def _wait_for_debugging_endpoint(
@@ -350,7 +368,7 @@ def _discover_lists(page: Any) -> tuple[MapsList, ...]:
         if not metadata.is_visible():
             continue
         details = metadata.evaluate(
-            """
+            r"""
             node => {
                 const metadataText = (node.innerText || node.textContent || '').trim();
                 let container = node.parentElement;
