@@ -458,6 +458,70 @@ def _discover_places(page: Any) -> tuple[MapsPlace, ...]:
         url = urljoin(_MAPS_HOME, href)
         name = (link.get_attribute("aria-label") or link.inner_text() or "Saved place").strip()
         found.setdefault(_canonical_url(url), MapsPlace(name=name.splitlines()[0], url=url))
+    if found:
+        return tuple(found.values())
+
+    return _discover_places_from_cards(page)
+
+
+def _discover_places_from_cards(page: Any) -> tuple[MapsPlace, ...]:
+    cards = page.locator("button:has(.fontHeadlineSmall)")
+    found: dict[str, MapsPlace] = {}
+    visited_cards: set[str] = set()
+    stable_rounds = 0
+
+    for _ in range(10_000):
+        next_card: tuple[int, str, str] | None = None
+        for index in range(cards.count()):
+            card = cards.nth(index)
+            if not card.is_visible():
+                continue
+            name_locator = card.locator(".fontHeadlineSmall").first
+            name = name_locator.inner_text().strip()
+            if not name:
+                continue
+            identity = f"{name}\n{card.get_attribute('jslog') or ''}"
+            if identity not in visited_cards:
+                next_card = (index, identity, name)
+                break
+
+        if next_card:
+            index, identity, name = next_card
+            visited_cards.add(identity)
+            card = cards.nth(index)
+            card.scroll_into_view_if_needed()
+            card.click()
+            page.wait_for_url(re.compile(r"/maps/place/"))
+            url = page.url
+            found.setdefault(_canonical_url(url), MapsPlace(name=name, url=url))
+            page.go_back(wait_until="domcontentloaded")
+            page.wait_for_timeout(500)
+            stable_rounds = 0
+            continue
+
+        if not cards.count():
+            break
+        scrolled = cards.last.evaluate(
+            """
+            node => {
+                let container = node.parentElement;
+                while (container) {
+                    if (container.scrollHeight > container.clientHeight + 20) {
+                        const before = container.scrollTop;
+                        container.scrollTop += Math.max(300, container.clientHeight * 0.8);
+                        return container.scrollTop > before;
+                    }
+                    container = container.parentElement;
+                }
+                return false;
+            }
+            """
+        )
+        page.wait_for_timeout(350)
+        stable_rounds = 0 if scrolled else stable_rounds + 1
+        if stable_rounds >= 3:
+            break
+
     return tuple(found.values())
 
 
