@@ -73,13 +73,14 @@ def run_browser_copy(
             try:
                 context = playwright.chromium.launch_persistent_context(
                     str(profile_path),
+                    channel="chrome",
                     headless=False,
                     locale="en-US",
                     args=["--lang=en-US"],
                 )
             except PlaywrightError as exc:
                 raise WorkflowProblem(
-                    "Chromium is unavailable. Run 'python -m playwright install chromium'."
+                    "Google Chrome is unavailable. Install Google Chrome and try again."
                 ) from exc
 
             page: Page = context.pages[0] if context.pages else context.new_page()
