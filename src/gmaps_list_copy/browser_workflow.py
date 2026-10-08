@@ -12,7 +12,6 @@ from typing import Any, TextIO
 from urllib.parse import urljoin
 
 _MAPS_HOME = "https://www.google.com/maps/?hl=en"
-_MAPS_SAVED = "https://www.google.com/maps/saved?hl=en"
 _STATE_VERSION = 1
 _PROFILE_DIR = Path(".gmaps-list-copy/browser-profile")
 _STATE_DIR = Path(".gmaps-list-copy/sessions")
@@ -157,8 +156,18 @@ def print_summary(summary: CopySummary, output: TextIO = sys.stdout) -> None:
 
 
 def _open_saved(page: Any) -> None:
-    page.goto(_MAPS_SAVED, wait_until="domcontentloaded")
+    page.goto(_MAPS_HOME, wait_until="domcontentloaded")
     _dismiss_consent(page)
+    saved_button = page.get_by_role("button", name="Saved", exact=True)
+    try:
+        saved_button.first.wait_for(state="visible")
+        saved_button.first.click()
+        page.wait_for_load_state("domcontentloaded")
+    except Exception as exc:
+        raise WorkflowProblem(
+            "Google Maps did not show its Saved navigation button. "
+            "The Maps interface may have changed."
+        ) from exc
 
 
 def _dismiss_consent(page: Any) -> None:
