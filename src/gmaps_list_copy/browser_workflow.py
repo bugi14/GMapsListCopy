@@ -5,9 +5,12 @@ import json
 import os
 import re
 import shutil
-import sqlite3
+import socket
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -78,31 +81,22 @@ def run_browser_copy(
 
     profile_path.mkdir(parents=True, exist_ok=True)
     auth_marker = profile_path / _AUTH_MARKER
-    if not auth_marker.exists():
-        _authenticate_in_regular_chrome(profile_path, output)
+    endpoint = _open_regular_chrome(
+        profile_path, auth_marker, input_fn=input_fn, output=output
+    )
     try:
         with sync_playwright() as playwright:
             try:
-                launch_options: dict[str, Any] = {
-                    "channel": "chrome",
-                    "headless": False,
-                    "locale": "en-US",
-                    "args": ["--lang=en-US"],
-                }
-                if sys.platform == "darwin":
-                    launch_options["ignore_default_args"] = [
-                        "--password-store=basic",
-                        "--use-mock-keychain",
-                    ]
-                context = playwright.chromium.launch_persistent_context(
-                    str(profile_path),
-                    **launch_options,
-                )
+                browser = playwright.chromium.connect_over_cdp(endpoint)
             except PlaywrightError as exc:
                 raise WorkflowProblem(
-                    "Google Chrome is unavailable. Install Google Chrome and try again."
+                    "Could not attach automation to the open Google Chrome window."
                 ) from exc
 
+            if not browser.contexts:
+                browser.close()
+                raise WorkflowProblem("The open Chrome window has no browser context.")
+            context = browser.contexts[0]
             page: Page = context.pages[0] if context.pages else context.new_page()
             page.set_default_timeout(15_000)
             try:
@@ -150,11 +144,11 @@ def run_browser_copy(
                     _write_state(session_path, state)
 
                 summary = _summarize(source.name, destination, places, state, session_path)
-                context.close()
+                browser.close()
                 return summary
             except (WorkflowProblem, PlaywrightError) as exc:
                 diagnostic = _capture_diagnostic(page)
-                context.close()
+                browser.close()
                 if isinstance(exc, WorkflowProblem):
                     message = str(exc)
                 else:
@@ -215,58 +209,61 @@ def _verify_authentication(page: Any, auth_marker: Path) -> None:
     )
 
 
-def _authenticate_in_regular_chrome(profile_path: Path, output: TextIO) -> None:
-    command = _chrome_auth_command(profile_path)
+def _open_regular_chrome(
+    profile_path: Path,
+    auth_marker: Path,
+    *,
+    input_fn: Callable[[str], str],
+    output: TextIO,
+) -> str:
+    port = _available_local_port()
+    start_url = _MAPS_HOME if auth_marker.exists() else _GOOGLE_SIGN_IN
+    command = _chrome_command(profile_path, port, start_url)
     if command is None:
         raise WorkflowProblem(
             "Google Chrome is required for authentication but was not found."
         )
 
-    print(
-        "Opening a regular Google Chrome window for secure authentication. Sign in "
-        "to Google Maps, wait until your account avatar is visible, then quit that "
-        "Chrome instance (Cmd+Q on macOS). Copying will continue automatically.",
-        file=output,
-    )
+    if not auth_marker.exists():
+        print(
+            "Opening a regular Google Chrome window for secure authentication. Sign "
+            "in and wait until Google Maps shows your account avatar.",
+            file=output,
+        )
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = _LOG_DIR / "chrome-auth.log"
     try:
         with log_path.open("w", encoding="utf-8") as log:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 command,
-                check=False,
                 stdout=log,
                 stderr=subprocess.STDOUT,
             )
     except OSError as exc:
         raise WorkflowProblem(f"Could not open Google Chrome: {exc}") from exc
-    if completed.returncode != 0:
-        raise WorkflowProblem(
-            f"Google Chrome exited with status {completed.returncode} during "
-            f"authentication. Log: {log_path}"
-        )
-    if not _profile_has_google_session(profile_path):
-        raise WorkflowProblem(
-            "Google authentication did not finish. Wait until Google Maps has loaded "
-            f"with your account avatar before closing Chrome. Log: {log_path}"
-        )
+    endpoint = f"http://127.0.0.1:{port}"
+    _wait_for_debugging_endpoint(endpoint, process, log_path)
+    if not auth_marker.exists():
+        input_fn("Press Enter after Google Maps shows your account avatar: ")
+    return endpoint
 
 
-def _chrome_auth_command(profile_path: Path) -> list[str] | None:
+def _chrome_command(profile_path: Path, port: int, start_url: str) -> list[str] | None:
     arguments = [
         f"--user-data-dir={profile_path.resolve()}",
+        f"--remote-debugging-port={port}",
+        "--remote-debugging-address=127.0.0.1",
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-background-mode",
         "--enable-logging=stderr",
-        _GOOGLE_SIGN_IN,
+        start_url,
     ]
     if sys.platform == "darwin":
         application = Path("/Applications/Google Chrome.app")
         if application.is_dir():
             return [
                 "/usr/bin/open",
-                "-W",
                 "-n",
                 "-a",
                 "Google Chrome",
@@ -295,21 +292,30 @@ def _chrome_auth_command(profile_path: Path) -> list[str] | None:
     return [str(executable), *arguments] if executable else None
 
 
-def _profile_has_google_session(profile_path: Path) -> bool:
-    cookies_path = profile_path / "Default" / "Cookies"
-    if not cookies_path.exists():
-        return False
-    try:
-        with sqlite3.connect(f"file:{cookies_path}?mode=ro", uri=True) as connection:
-            result = connection.execute(
-                "SELECT 1 FROM cookies "
-                "WHERE host_key LIKE '%google.com' "
-                "AND name IN ('SID', 'SAPISID', '__Secure-1PSID', '__Secure-3PSID') "
-                "LIMIT 1"
-            ).fetchone()
-    except sqlite3.Error:
-        return False
-    return result is not None
+def _available_local_port() -> int:
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
+def _wait_for_debugging_endpoint(
+    endpoint: str, process: subprocess.Popen[Any], log_path: Path
+) -> None:
+    deadline = time.monotonic() + 15
+    version_url = f"{endpoint}/json/version"
+    while time.monotonic() < deadline:
+        if process.poll() not in (None, 0):
+            raise WorkflowProblem(
+                f"Google Chrome exited before automation could attach. Log: {log_path}"
+            )
+        try:
+            with urllib.request.urlopen(version_url, timeout=1):
+                return
+        except (OSError, urllib.error.URLError):
+            time.sleep(0.25)
+    raise WorkflowProblem(
+        f"Google Chrome did not expose its local automation endpoint. Log: {log_path}"
+    )
 
 
 def _discover_lists(page: Any) -> tuple[MapsList, ...]:
