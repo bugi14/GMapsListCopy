@@ -113,8 +113,15 @@ def run_browser_copy(
                         "The list may be empty or the Maps interface may have changed."
                     )
 
-                destination = f"{source.name}{destination_suffix}"
-                session_path = state_path or _default_state_path(source.name)
+                destination = _choose_destination_name(
+                    source.name,
+                    destination_suffix,
+                    input_fn=input_fn,
+                    output=output,
+                )
+                session_path = state_path or _default_state_path(
+                    source.name, destination
+                )
                 state = _load_or_create_state(session_path, source, destination, places)
                 _ensure_destination(page, destination)
 
@@ -424,6 +431,22 @@ def _choose_list(
             return choices[int(response) - 1]
 
 
+def _choose_destination_name(
+    source: str,
+    suffix: str,
+    *,
+    input_fn: Callable[[str], str],
+    output: TextIO,
+) -> str:
+    default = f"{source}{suffix}"
+    while True:
+        response = input_fn(f"Destination list name [{default}]: ").strip()
+        destination = response or default
+        if len(destination) <= 40:
+            return destination
+        print("Google Maps list names can contain at most 40 characters.", file=output)
+
+
 def _open_list(page: Any, source: MapsList) -> None:
     if source.href:
         page.goto(urljoin(_MAPS_HOME, source.href), wait_until="domcontentloaded")
@@ -536,11 +559,18 @@ def _ensure_destination(page: Any, destination: str) -> None:
         new_list = page.get_by_text(re.compile(r"^New list$", re.IGNORECASE))
     new_list.first.click()
 
-    name_input = page.get_by_role("textbox", name=re.compile(r"name", re.IGNORECASE))
-    if not name_input.count():
-        name_input = page.get_by_placeholder(re.compile(r"name", re.IGNORECASE))
+    title_button = page.locator('button[aria-label="Untitled list"]')
+    title_button.first.wait_for(state="visible")
+    title_button.first.click()
+
+    name_input = page.locator('input[maxlength="40"]:visible')
+    name_input.first.wait_for(state="visible")
     name_input.first.fill(destination)
-    page.get_by_role("button", name="Create", exact=True).click()
+    name_input.first.press("Enter")
+
+    done = page.get_by_role("button", name="Done", exact=True)
+    if done.count() and done.first.is_visible():
+        done.first.click()
     page.get_by_text(destination, exact=True).first.wait_for(state="visible")
 
 
@@ -644,8 +674,10 @@ def _capture_diagnostic(page: Any) -> Path | None:
         return None
 
 
-def _default_state_path(source: str) -> Path:
-    return _STATE_DIR / f"{_slug(source) or 'list'}.json"
+def _default_state_path(source: str, destination: str) -> Path:
+    source_slug = _slug(source) or "list"
+    destination_slug = _slug(destination) or "copy"
+    return _STATE_DIR / f"{source_slug}-to-{destination_slug}.json"
 
 
 def _place_key(url: str) -> str:
