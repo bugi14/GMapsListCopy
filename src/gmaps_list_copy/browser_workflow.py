@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 from collections.abc import Callable
@@ -207,27 +208,18 @@ def _verify_authentication(page: Any, auth_marker: Path) -> None:
 
 
 def _authenticate_in_regular_chrome(profile_path: Path, output: TextIO) -> None:
-    executable = _find_chrome_executable()
-    if executable is None:
+    command = _chrome_auth_command(profile_path)
+    if command is None:
         raise WorkflowProblem(
             "Google Chrome is required for authentication but was not found."
         )
 
     print(
         "Opening a regular Google Chrome window for secure authentication. Sign in "
-        "to Google Maps, then close that Chrome window. Copying will continue "
-        "automatically.",
+        "to Google Maps, wait until your account avatar is visible, then quit that "
+        "Chrome instance (Cmd+Q on macOS). Copying will continue automatically.",
         file=output,
     )
-    command = [
-        str(executable),
-        f"--user-data-dir={profile_path.resolve()}",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-background-mode",
-        "--enable-logging=stderr",
-        _GOOGLE_SIGN_IN,
-    ]
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = _LOG_DIR / "chrome-auth.log"
     try:
@@ -245,15 +237,38 @@ def _authenticate_in_regular_chrome(profile_path: Path, output: TextIO) -> None:
             f"Google Chrome exited with status {completed.returncode} during "
             f"authentication. Log: {log_path}"
         )
-
-
-def _find_chrome_executable() -> Path | None:
-    candidates: list[Path] = []
-    if sys.platform == "darwin":
-        candidates.append(
-            Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+    if not _profile_has_google_session(profile_path):
+        raise WorkflowProblem(
+            "Google authentication did not finish. Wait until Google Maps has loaded "
+            f"with your account avatar before closing Chrome. Log: {log_path}"
         )
-    elif sys.platform == "win32":
+
+
+def _chrome_auth_command(profile_path: Path) -> list[str] | None:
+    arguments = [
+        f"--user-data-dir={profile_path.resolve()}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-background-mode",
+        "--enable-logging=stderr",
+        _GOOGLE_SIGN_IN,
+    ]
+    if sys.platform == "darwin":
+        application = Path("/Applications/Google Chrome.app")
+        if application.is_dir():
+            return [
+                "/usr/bin/open",
+                "-W",
+                "-n",
+                "-a",
+                "Google Chrome",
+                "--args",
+                *arguments,
+            ]
+        return None
+
+    candidates: list[Path] = []
+    if sys.platform == "win32":
         for variable in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
             base = os.environ.get(variable)
             if base:
@@ -266,7 +281,27 @@ def _find_chrome_executable() -> Path | None:
             if resolved:
                 candidates.append(Path(resolved))
 
-    return next((candidate for candidate in candidates if candidate.is_file()), None)
+    executable = next(
+        (candidate for candidate in candidates if candidate.is_file()), None
+    )
+    return [str(executable), *arguments] if executable else None
+
+
+def _profile_has_google_session(profile_path: Path) -> bool:
+    cookies_path = profile_path / "Default" / "Cookies"
+    if not cookies_path.exists():
+        return False
+    try:
+        with sqlite3.connect(f"file:{cookies_path}?mode=ro", uri=True) as connection:
+            result = connection.execute(
+                "SELECT 1 FROM cookies "
+                "WHERE host_key LIKE '%google.com' "
+                "AND name IN ('SID', 'SAPISID', '__Secure-1PSID', '__Secure-3PSID') "
+                "LIMIT 1"
+            ).fetchone()
+    except sqlite3.Error:
+        return False
+    return result is not None
 
 
 def _discover_lists(page: Any) -> tuple[MapsList, ...]:
